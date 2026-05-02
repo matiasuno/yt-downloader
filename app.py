@@ -1,5 +1,7 @@
 import sys
 import os
+import tempfile
+import shutil
 
 # PyInstaller compatibility: find templates/resources relative to the bundle
 if getattr(sys, 'frozen', False):
@@ -58,10 +60,8 @@ FFMPEG_BIN, FFMPEG_DIR = _setup_ffmpeg()
 from flask import Flask, request, jsonify, send_file, render_template, Response, stream_with_context
 import yt_dlp
 import subprocess
-import tempfile
 import uuid
 import threading
-import shutil
 import time
 import json
 import re
