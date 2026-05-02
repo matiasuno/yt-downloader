@@ -9,12 +9,51 @@ else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     _open_browser_on_start = False
 
-# Use bundled static ffmpeg from imageio-ffmpeg
-try:
-    import imageio_ffmpeg
-    FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
-except Exception:
-    FFMPEG_BIN = 'ffmpeg'
+def _setup_ffmpeg():
+    """Find the bundled ffmpeg binary and ensure it's named 'ffmpeg'/'ffmpeg.exe'
+    so yt-dlp can find it — imageio-ffmpeg stores it with a versioned name."""
+    src = None
+    try:
+        import imageio_ffmpeg
+        candidate = imageio_ffmpeg.get_ffmpeg_exe()
+        if candidate and os.path.isfile(candidate):
+            src = candidate
+    except Exception:
+        pass
+
+    # When frozen, also scan _MEIPASS directly in case imageio_ffmpeg lookup fails
+    if src is None and getattr(sys, 'frozen', False):
+        for search_dir in [
+            sys._MEIPASS,
+            os.path.join(sys._MEIPASS, 'imageio_ffmpeg', 'binaries'),
+        ]:
+            if not os.path.isdir(search_dir):
+                continue
+            for f in os.listdir(search_dir):
+                if f.lower().startswith('ffmpeg') and not f.endswith('.py'):
+                    src = os.path.join(search_dir, f)
+                    break
+            if src:
+                break
+
+    if src is None:
+        return 'ffmpeg', ''  # fall back to system PATH
+
+    expected = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
+    if os.path.basename(src).lower() == expected:
+        return src, os.path.dirname(src)
+
+    # Copy to a stable temp dir under the standard name so yt-dlp finds it
+    ffmpeg_tmpdir = os.path.join(tempfile.gettempdir(), 'ytdl_ffmpeg_bin')
+    os.makedirs(ffmpeg_tmpdir, exist_ok=True)
+    dst = os.path.join(ffmpeg_tmpdir, expected)
+    if not os.path.isfile(dst) or os.path.getsize(dst) != os.path.getsize(src):
+        shutil.copy2(src, dst)
+        if sys.platform != 'win32':
+            os.chmod(dst, 0o755)
+    return dst, ffmpeg_tmpdir
+
+FFMPEG_BIN, FFMPEG_DIR = _setup_ffmpeg()
 
 from flask import Flask, request, jsonify, send_file, render_template, Response, stream_with_context
 import yt_dlp
@@ -84,8 +123,6 @@ def run_download_job(job_id, url, fmt, start, end):
                 elif d['status'] == 'finished':
                     j['progress'] = {'phase': 'processing', 'percent': 92}
 
-        ffmpeg_dir = os.path.dirname(FFMPEG_BIN)
-
         if fmt in ('mp3', 'wav'):
             pp = {'key': 'FFmpegExtractAudio', 'preferredcodec': fmt}
             if fmt == 'mp3':
@@ -94,7 +131,7 @@ def run_download_job(job_id, url, fmt, start, end):
                 'format': 'bestaudio/best',
                 'outtmpl': os.path.join(tmpdir, f'{job_id}.%(ext)s'),
                 'postprocessors': [pp],
-                'ffmpeg_location': ffmpeg_dir,
+                'ffmpeg_location': FFMPEG_DIR or FFMPEG_BIN,
                 'quiet': True,
                 'no_warnings': True,
                 'progress_hooks': [progress_hook],
@@ -103,7 +140,7 @@ def run_download_job(job_id, url, fmt, start, end):
             ydl_opts = {
                 'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
                 'outtmpl': os.path.join(tmpdir, f'{job_id}.%(ext)s'),
-                'ffmpeg_location': ffmpeg_dir,
+                'ffmpeg_location': FFMPEG_DIR or FFMPEG_BIN,
                 'quiet': True,
                 'no_warnings': True,
                 'merge_output_format': 'mp4',
@@ -287,7 +324,15 @@ def get_result(job_id):
 
 def _open_browser():
     time.sleep(1.5)
-    webbrowser.open(f'http://localhost:{PORT}')
+    try:
+        if sys.platform == 'darwin':
+            subprocess.Popen(['open', f'http://localhost:{PORT}'])
+        elif sys.platform == 'win32':
+            subprocess.Popen(['cmd', '/c', 'start', f'http://localhost:{PORT}'])
+        else:
+            webbrowser.open(f'http://localhost:{PORT}')
+    except Exception:
+        webbrowser.open(f'http://localhost:{PORT}')
 
 
 if __name__ == '__main__':
